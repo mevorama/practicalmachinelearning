@@ -1,0 +1,181 @@
+---
+title: 'Peer Assesment: Exercise Prediction'
+author: "Matt Metherell"
+date: "Wednesday, August 20, 2014"
+output: html_document
+---
+
+## Synopsis
+
+In this report we aim to explore the data produced by various personal fitness devices, and use that data to deduce what kind of exercise was being done.  This includes cases where the exercises were performed incorrectly.
+
+### Reading in the data
+
+We want to get the data from the internet into a dataframe, so we download it if it's not already in the working directory, then read the csv file.  This may take a few minutes.
+
+```{r load}
+if (!file.exists("pml-training.csv")) {
+    fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv"
+    download.file(fileURL, method="curl")
+}
+if (!file.exists("pml-testing.csv")) {
+    fileURL <- "https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv"
+    download.file(fileURL, method="curl")
+}
+set.seed(2308)
+training <- read.csv("pml-training.csv")
+```
+
+## Preprocessing
+
+We are attempting to predict the factor in the 'classe' column, labelled A-E.
+```{r levels}
+levels(training$classe)
+```
+
+The first seven columns can be discarded as they are for identification of the observation and user, rather than something with which to predict the type of exercise.
+
+```{r cols 1-7}
+training <- training[,-(1:7)]
+```
+
+We can also remove any columns that are made mostly of NAs as they will be of little use in making predictions.
+
+```{r remove NAs}
+
+# Function to identify columns with over 70% NAs
+over70NAs <- function(vector){
+        if(sum(is.na(vector))/length(vector) > 0.7){
+                TRUE;
+        }else{
+                FALSE;
+        }
+}
+
+# Identify which columns have 70%+ NAs
+vars70NAs <- sapply(training, over70NAs)
+# remove these columns
+training <- training[,!vars70NAs]
+```
+
+We must make sure all the columns are of numeric class to properly work with the data.  The only exception being the 'classe' column, which is a factor as we explained earlier.
+
+```{r convert numeric}
+end <- ncol(training)
+training[,-end] <- data.frame(sapply(training[,-end],as.numeric))
+```
+
+Finally, we can use the nearZeroVar function in caret to identify other columns that will not be of use when training, which will speed up the process.
+
+```{r nearZeroVar}
+library(caret)
+nzv <- nearZeroVar(training[,-end],saveMetrics = TRUE)
+training <- training[,!as.logical(nzv$nzv)]
+```
+
+This leaves us with `r ncol(training)` columns.
+
+### Splitting in the data
+
+We will split the training data into training and cross-validation so that we can try several models.  We will use the training set to learn the models and the cross-validation set to determine which model appears to be the most accurate.
+
+```{r split}
+inTrain = createDataPartition(training$classe, p=0.7)[[1]]
+training = training[ inTrain,]
+crossval = training[-inTrain,]
+```
+
+### Principal Component Analysis
+
+Now we can run a Principla Component Analysis to find the combination of variables that best predict the classe, and use the predict function to return a sliimed down version of both the training dataset and the crossvalidation one for use in predictions.  This allows us to use more complex models that aren't possible with the full set due to processor and memory limitations.
+
+```{r pca}
+end <- ncol(training)
+preProc <- preProcess(training[, -end], method = "pca")
+train <- predict(preProc, training[, -end])
+val <- predict(preProc, crossval[, -end])
+ncol(training);ncol(train);
+```
+
+This gives us two training datasets, one with `r ncol(training)` columns for models that require less memory and processing power, and one with `r ncol(train)` columns for more complicated models.
+
+## Selecting Models
+
+We have many models at our disposal, so let's see which performs best on the cross validation set.
+
+### Trees
+
+We can try the Tree model with both dataframes, that with just the Principle components (in dataframe 'train') and the more complete set of variables in dataframe 'training'.
+
+``` {r train rpart pc}
+library(rpart)
+modFitrpart <- train(training$classe~.,method="rpart",data=train)
+predrpart <- predict(modFitrpart,newdata=val)
+accrpart <- postResample(crossval$classe, predrpart)
+accuracyrpart <- accrpart[[1]]
+outofsamplerpart <- 1 - accuracyrpart
+accuracyrpart; outofsamplerpart;
+```
+
+Using the Principle Components, the Tree method has an accuracy of `r accuracyrpart*100`% and an out of sample error of `r outofsamplerpart*100`%, based on the `r nrow(crossval)` observations in the cross-validation dataset.
+
+``` {r train rpart}
+modFitrpartfull <- train(classe~.,method="rpart",data=training)
+predrpartfull <- predict(modFitrpartfull,newdata=crossval)
+accrpartfull <- postResample(crossval$classe, predrpartfull)
+accuracyrpartfull <- accrpartfull[[1]]
+outofsamplerpartfull <- 1 - accuracyrpartfull
+accuracyrpartfull; outofsamplerpartfull;
+```
+
+The Tree method using all predictors in training has an accuracy of `r accuracyrpartfull*100`% and an out of sample error of `r outofsamplerpartfull*100`%, which demonstrates the trade-off between accuracy and simplicity.
+
+### Model-Based
+
+Next we can attempt a Model-based prediction, which will only be possible using the Principle Components dataset.
+
+``` {r train lda}
+modFitlda <- train(training$classe~.,method="lda",data=train)
+predlda <- predict(modFitlda,newdata=val)
+acclda <- postResample(crossval$classe, predlda)
+accuracylda <- acclda[[1]]
+outofsamplelda <- 1 - accuracylda
+accuracylda; outofsamplelda;
+```
+
+The Model-based method has an accuracy of `r accuracylda*100`% and an out of sample error of `r outofsamplelda*100`%.
+
+### Random Forests
+
+Random Forests are regarded as the most accurate and slowest, so even if we only use the principle components this may take some time.
+
+``` {r train rf}
+library(randomForest)
+modFitrf <- train(training$classe~.,method="rf",data=train,trControl = trainControl(method = "cv", number = 4), importance = TRUE)
+predrf <- predict(modFitrf,newdata=val)
+accrf <- postResample(crossval$classe, predrf)
+accuracyrf <- accrf[[1]]
+outofsamplerf <- 1 - accuracyrf
+accuracyrf; outofsamplerf;
+```
+
+The Random Forest method has an accuracy of `r accuracyrf*100`% and an out of sample error of `r outofsamplerf*100`%.  So this clearly can't be bettered and we can move on to the test set using the Random Forest model.
+
+### The Test Set
+
+First we must load the test data and then apply the same pre-processing to the test data that we did on the training and cross validation sets.
+
+```{r test preprocess}
+testing <- read.csv("pml-testing.csv")
+testing <- testing[,colnames(testing) %in% colnames(training)]
+testing <- data.frame(sapply(testing,as.numeric)) #convert to numeric
+test <- predict(preProc, testing) #apply Principle Component Analysis
+```
+
+Now we can run our Random Forest model against the test set, which correctly predicts 19 of the 20 observations.
+
+```{r test results}
+predfinal <- predict(modFitrf,newdata=test)
+predfinal
+```
+
